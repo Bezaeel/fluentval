@@ -1,0 +1,221 @@
+name: Publish to crates.io
+
+on:
+  push:
+    branches:
+      - master  # Automatic trigger on merge to master (stable release)
+  pull_request:
+    branches:
+      - master  # Trigger on pull requests to master
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build and publish'
+        required: true
+        type: string
+        default: 'master'
+      major:
+        description: 'Major version number (optional override, defaults to Cargo.toml)'
+        required: false
+        type: string
+      minor:
+        description: 'Minor version number (optional override, defaults to Cargo.toml)'
+        required: false
+        type: string
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run tests
+        run: cargo test --verbose
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write  # Required to commit updated Cargo.toml back
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Set up cargo credentials
+        run: |
+          mkdir -p ~/.cargo
+          echo "[registry]" >> ~/.cargo/config.toml
+          echo 'token = "${{ secrets.CARGO_REGISTRY_TOKEN }}"' >> ~/.cargo/config.toml
+
+      - name: Determine version
+        id: version
+        run: |
+          # Determine branch name
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH_NAME="${{ github.event.inputs.branch }}"
+          else
+            BRANCH_NAME="${{ github.ref_name }}"
+          fi
+          
+          # Read version from Cargo.toml (mastertainers update major/minor here)
+          if grep -q '^version =' Cargo.toml; then
+            CURRENT_VERSION_FULL=$(grep '^version =' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+            CURRENT_VERSION_CLEAN=$(echo "$CURRENT_VERSION_FULL" | sed 's/-alpha\..*//')
+            IFS='.' read -r MAJOR_FROM_TOML MINOR_FROM_TOML PATCH_FROM_TOML <<< "$CURRENT_VERSION_CLEAN"
+          else
+            MAJOR_FROM_TOML=""
+            MINOR_FROM_TOML=""
+            PATCH_FROM_TOML=""
+          fi
+          
+          # Use inputs as overrides for workflow_dispatch, otherwise use Cargo.toml values
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Use input if provided, otherwise use Cargo.toml value
+            if [ -n "${{ github.event.inputs.major }}" ]; then
+              MAJOR_VERSION="${{ github.event.inputs.major }}"
+            else
+              MAJOR_VERSION="${MAJOR_FROM_TOML:-0}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.minor }}" ]; then
+              MINOR_VERSION="${{ github.event.inputs.minor }}"
+            else
+              MINOR_VERSION="${MINOR_FROM_TOML:-1}"
+            fi
+          else
+            # For push events, always use Cargo.toml
+            MAJOR_VERSION="${MAJOR_FROM_TOML:-0}"
+            MINOR_VERSION="${MINOR_FROM_TOML:-1}"
+          fi
+          
+          # Get current patch version (from Cargo.toml or default to 0)
+          if [ -n "$PATCH_FROM_TOML" ] && [[ "$PATCH_FROM_TOML" =~ ^[0-9]+$ ]]; then
+            CURRENT_PATCH=$PATCH_FROM_TOML
+          else
+            CURRENT_PATCH=0
+          fi
+          
+          if [ "$BRANCH_NAME" = "master" ]; then
+            # For master branch: increment patch version
+            NEW_PATCH=$((CURRENT_PATCH + 1))
+            NEW_VERSION="${MAJOR_VERSION}.${MINOR_VERSION}.${NEW_PATCH}"
+            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "is_alpha=false" >> $GITHUB_OUTPUT
+            echo "Using major.minor from Cargo.toml: ${MAJOR_VERSION}.${MINOR_VERSION}"
+            echo "Incremented patch: $CURRENT_PATCH -> $NEW_PATCH"
+            echo "Publishing stable version: $NEW_VERSION"
+          else
+            # For non-master branches: use base version + alpha with commit SHA
+            SHORT_SHA=$(git rev-parse --short=7 HEAD)
+            NEW_VERSION="${MAJOR_VERSION}.${MINOR_VERSION}.${CURRENT_PATCH}-alpha.${SHORT_SHA}"
+            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "is_alpha=true" >> $GITHUB_OUTPUT
+            echo "Using major.minor from Cargo.toml: ${MAJOR_VERSION}.${MINOR_VERSION}"
+            echo "Publishing alpha version: $NEW_VERSION"
+          fi
+
+      - name: Update version in Cargo.toml
+        run: |
+          if grep -q '^version =' Cargo.toml; then
+            sed -i "s/^version = \".*\"/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+          else
+            # Add version field if it doesn't exist
+            sed -i '/^\[package\]/a version = "'"${{ steps.version.outputs.version }}"'"' Cargo.toml
+          fi
+          echo "Updated Cargo.toml version to ${{ steps.version.outputs.version }}"
+
+      - name: Verify package
+        run: cargo package --allow-dirty
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Update Cargo.toml with published version
+        if: steps.version.outputs.is_alpha == 'false'
+        run: |
+          # Ensure Cargo.toml has the published stable version
+          if grep -q '^version =' Cargo.toml; then
+            sed -i "s/^version = \".*\"/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+          else
+            sed -i '/^\[package\]/a version = "'"${{ steps.version.outputs.version }}"'"' Cargo.toml
+          fi
+          echo "Updated Cargo.toml with published version: ${{ steps.version.outputs.version }}"
+
+      - name: Commit and push updated Cargo.toml
+        if: steps.version.outputs.is_alpha == 'false'
+        run: |
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Determine the branch to commit to
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH_TO_COMMIT="${{ github.event.inputs.branch }}"
+          else
+            BRANCH_TO_COMMIT="${{ github.ref_name }}"
+          fi
+          
+          # Ensure we're on the correct branch
+          git checkout "$BRANCH_TO_COMMIT" || git checkout -b "$BRANCH_TO_COMMIT"
+          
+          # Check if Cargo.toml has changes
+          if git diff --quiet Cargo.toml; then
+            echo "No changes to Cargo.toml, skipping commit"
+          else
+            # Commit and push
+            git add Cargo.toml
+            git commit -m "chore: update version to ${{ steps.version.outputs.version }} after publish"
+            git push origin "$BRANCH_TO_COMMIT"
+            echo "Committed and pushed updated Cargo.toml to $BRANCH_TO_COMMIT"
+          fi
+

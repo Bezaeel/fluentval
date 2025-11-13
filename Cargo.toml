@@ -7,7 +7,6 @@ description = "A fluent validation library for Rust with a builder pattern API"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bezaeel/fluentval"
 keywords = ["validation", "fluent", "validator", "builder", "rules"]
-categories = ["algorithms", "development-tools"]
 
 [lib]
 name = "fluentval"
