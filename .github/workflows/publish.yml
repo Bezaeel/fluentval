@@ -4,9 +4,19 @@ on:
   push:
     branches:
       - master  # Automatic trigger on merge to master (stable release)
+    paths:
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   pull_request:
     branches:
       - master  # Trigger on pull requests to master
+    paths:
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   workflow_dispatch:
     inputs:
       branch:
@@ -219,4 +229,47 @@ jobs:
             git push origin "$BRANCH_TO_COMMIT"
             echo "Committed and pushed updated Cargo.toml to $BRANCH_TO_COMMIT"
           fi
+
+  release:
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write  # Required to create releases
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+          fetch-depth: 0
+
+      - name: Get published version
+        id: version
+        run: |
+          # Read version from Cargo.toml (should be updated by publish job)
+          if grep -q '^version =' Cargo.toml; then
+            CURRENT_VERSION_FULL=$(grep '^version =' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+            CURRENT_VERSION_CLEAN=$(echo "$CURRENT_VERSION_FULL" | sed 's/-alpha\..*//')
+            echo "version=$CURRENT_VERSION_CLEAN" >> $GITHUB_OUTPUT
+            echo "is_alpha=$([ -z "$(echo "$CURRENT_VERSION_FULL" | grep -o '-alpha')" ] && echo 'false' || echo 'true')" >> $GITHUB_OUTPUT
+          else
+            echo "Error: version not found in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.is_alpha == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          body: |
+            Release v${{ steps.version.outputs.version }}
+            
+            Published to [crates.io](https://crates.io/crates/fluentval/${{ steps.version.outputs.version }})
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
