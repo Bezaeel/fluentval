@@ -1,4 +1,4 @@
-# FluentVal
+# FluentVal <img src="https://github.com/Bezaeel/fluentval/actions/workflows/publish.yml/badge.svg" alt="actions status" />
 
 A fluent validation library for Rust with a builder pattern API. FluentVal provides an intuitive, chainable API for validating data structures with comprehensive error reporting.
 
