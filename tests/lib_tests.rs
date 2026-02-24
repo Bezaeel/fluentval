@@ -378,6 +378,78 @@ fn test_option_like_trait() {
 }
 
 #[test]
+fn test_numeric_trait_remaining_implementations() {
+    assert_eq!(5i16.to_f64(), 5.0);
+    assert_eq!(100i64.to_f64(), 100.0);
+    assert_eq!(200u8.to_f64(), 200.0);
+    assert_eq!(1000u16.to_f64(), 1000.0);
+    assert_eq!(50000u64.to_f64(), 50000.0);
+}
+
+#[test]
+fn test_rule_builder_custom_messages() {
+    // not_empty with custom message
+    let rule_fn = RuleBuilder::<String>::for_property("name")
+        .not_empty(Some("custom not empty"))
+        .build();
+    assert_eq!(rule_fn(&"".to_string())[0].message, "custom not empty");
+
+    // not_null with custom message
+    let rule_fn = RuleBuilder::<Option<String>>::for_property("val")
+        .not_null(Some("custom not null"))
+        .build();
+    assert_eq!(rule_fn(&None::<String>)[0].message, "custom not null");
+
+    // min_length with custom message
+    let rule_fn = RuleBuilder::<String>::for_property("name")
+        .min_length(5, Some("custom min length"))
+        .build();
+    assert_eq!(rule_fn(&"abc".to_string())[0].message, "custom min length");
+
+    // max_length with custom message
+    let rule_fn = RuleBuilder::<String>::for_property("name")
+        .max_length(3, Some("custom max length"))
+        .build();
+    assert_eq!(rule_fn(&"abcdef".to_string())[0].message, "custom max length");
+
+    // email with custom message
+    let rule_fn = RuleBuilder::<String>::for_property("email")
+        .email(Some("custom email error"))
+        .build();
+    assert_eq!(rule_fn(&"invalid".to_string())[0].message, "custom email error");
+
+    // greater_than with custom message
+    let rule_fn = RuleBuilder::<i32>::for_property("age")
+        .greater_than(18, Some("custom greater than"))
+        .build();
+    assert_eq!(rule_fn(&10)[0].message, "custom greater than");
+
+    // greater_than_or_equal with custom message
+    let rule_fn = RuleBuilder::<i32>::for_property("age")
+        .greater_than_or_equal(18, Some("custom gte"))
+        .build();
+    assert_eq!(rule_fn(&10)[0].message, "custom gte");
+
+    // less_than with custom message
+    let rule_fn = RuleBuilder::<i32>::for_property("age")
+        .less_than(65, Some("custom less than"))
+        .build();
+    assert_eq!(rule_fn(&100)[0].message, "custom less than");
+
+    // less_than_or_equal with custom message
+    let rule_fn = RuleBuilder::<i32>::for_property("age")
+        .less_than_or_equal(65, Some("custom lte"))
+        .build();
+    assert_eq!(rule_fn(&100)[0].message, "custom lte");
+
+    // inclusive_between with custom message
+    let rule_fn = RuleBuilder::<i32>::for_property("score")
+        .inclusive_between(0, 100, Some("custom between"))
+        .build();
+    assert_eq!(rule_fn(&150)[0].message, "custom between");
+}
+
+#[test]
 fn test_validation_result_default() {
     let result = ValidationResult::default();
     assert!(result.is_valid());
