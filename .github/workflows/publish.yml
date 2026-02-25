@@ -9,14 +9,6 @@ on:
       - 'tests/**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
-  pull_request:
-    branches:
-      - master  # Trigger on pull requests to master
-    paths:
-      - 'src/**/*.rs'
-      - 'tests/**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
   workflow_dispatch:
     inputs:
       branch:
@@ -75,6 +67,9 @@ jobs:
     environment: pipeline
     permissions:
       contents: write  # Required to commit updated Cargo.toml back
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_alpha: ${{ steps.version.outputs.is_alpha }}
     
     steps:
       - name: Checkout code
@@ -219,55 +214,34 @@ jobs:
           # Ensure we're on the correct branch
           git checkout "$BRANCH_TO_COMMIT" || git checkout -b "$BRANCH_TO_COMMIT"
           
-          # Check if Cargo.toml has changes
-          if git diff --quiet Cargo.toml; then
-            echo "No changes to Cargo.toml, skipping commit"
+          # Check if Cargo.toml or Cargo.lock has changes
+          if git diff --quiet Cargo.toml Cargo.lock; then
+            echo "No changes to Cargo.toml or Cargo.lock, skipping commit"
           else
-            # Commit and push
-            git add Cargo.toml
+            # Commit and push both files
+            git add Cargo.toml Cargo.lock
             git commit -m "chore: update version to ${{ steps.version.outputs.version }} after publish"
             git push origin "$BRANCH_TO_COMMIT"
-            echo "Committed and pushed updated Cargo.toml to $BRANCH_TO_COMMIT"
+            echo "Committed and pushed updated Cargo.toml and Cargo.lock to $BRANCH_TO_COMMIT"
           fi
 
   release:
     runs-on: ubuntu-latest
     needs: publish
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.publish.outputs.is_alpha == 'false'
     permissions:
       contents: write  # Required to create releases
-    
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
-          fetch-depth: 0
-
-      - name: Get published version
-        id: version
-        run: |
-          # Read version from Cargo.toml (should be updated by publish job)
-          if grep -q '^version =' Cargo.toml; then
-            CURRENT_VERSION_FULL=$(grep '^version =' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-            CURRENT_VERSION_CLEAN=$(echo "$CURRENT_VERSION_FULL" | sed 's/-alpha\..*//')
-            echo "version=$CURRENT_VERSION_CLEAN" >> $GITHUB_OUTPUT
-            echo "is_alpha=$([ -z "$(echo "$CURRENT_VERSION_FULL" | grep -o '-alpha')" ] && echo 'false' || echo 'true')" >> $GITHUB_OUTPUT
-          else
-            echo "Error: version not found in Cargo.toml"
-            exit 1
-          fi
-
       - name: Create GitHub Release
-        if: steps.version.outputs.is_alpha == 'false'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: Release v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.publish.outputs.version }}
+          name: Release v${{ needs.publish.outputs.version }}
           body: |
-            Release v${{ steps.version.outputs.version }}
-            
-            Published to [crates.io](https://crates.io/crates/fluentval/${{ steps.version.outputs.version }})
+            Release v${{ needs.publish.outputs.version }}
+
+            Published to [crates.io](https://crates.io/crates/fluentval/${{ needs.publish.outputs.version }})
           draft: false
           prerelease: false
         env:
