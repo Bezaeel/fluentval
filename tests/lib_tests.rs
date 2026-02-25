@@ -73,8 +73,8 @@ fn test_rule_builder_not_empty() {
         .not_empty(None::<String>)
         .build();
 
-    assert!(rule_fn(&"".to_string()).len() > 0); // empty string should fail
-    assert!(rule_fn(&"   ".to_string()).len() > 0); // whitespace only should fail
+    assert!(!rule_fn(&"".to_string()).is_empty()); // empty string should fail
+    assert!(!rule_fn(&"   ".to_string()).is_empty()); // whitespace only should fail
     assert!(rule_fn(&"valid".to_string()).is_empty()); // valid string should pass
 }
 
@@ -84,7 +84,7 @@ fn test_rule_builder_min_length() {
         .min_length(5, None::<String>)
         .build();
 
-    assert!(rule_fn(&"abc".to_string()).len() > 0);
+    assert!(!rule_fn(&"abc".to_string()).is_empty());
     assert!(rule_fn(&"abcde".to_string()).is_empty());
     assert!(rule_fn(&"abcdef".to_string()).is_empty());
 }
@@ -97,7 +97,7 @@ fn test_rule_builder_max_length() {
 
     assert!(rule_fn(&"abc".to_string()).is_empty());
     assert!(rule_fn(&"abcde".to_string()).is_empty());
-    assert!(rule_fn(&"abcdef".to_string()).len() > 0);
+    assert!(!rule_fn(&"abcdef".to_string()).is_empty());
 }
 
 #[test]
@@ -106,10 +106,10 @@ fn test_rule_builder_length() {
         .length(3, 5, None::<String>, None::<String>)
         .build();
 
-    assert!(rule_fn(&"ab".to_string()).len() > 0); // too short
+    assert!(!rule_fn(&"ab".to_string()).is_empty()); // too short
     assert!(rule_fn(&"abc".to_string()).is_empty()); // valid
     assert!(rule_fn(&"abcde".to_string()).is_empty()); // valid
-    assert!(rule_fn(&"abcdef".to_string()).len() > 0); // too long
+    assert!(!rule_fn(&"abcdef".to_string()).is_empty()); // too long
 }
 
 #[test]
@@ -118,10 +118,10 @@ fn test_rule_builder_email() {
         .email(None::<String>)
         .build();
 
-    assert!(rule_fn(&"invalid".to_string()).len() > 0);
+    assert!(!rule_fn(&"invalid".to_string()).is_empty());
     assert!(rule_fn(&"test@example.com".to_string()).is_empty());
     assert!(rule_fn(&"user.name@domain.co.uk".to_string()).is_empty());
-    assert!(rule_fn(&"@example.com".to_string()).len() > 0);
+    assert!(!rule_fn(&"@example.com".to_string()).is_empty());
 }
 
 // RuleBuilder tests - Numeric rules
@@ -131,8 +131,8 @@ fn test_rule_builder_greater_than() {
         .greater_than(18, None::<String>)
         .build();
 
-    assert!(rule_fn(&17).len() > 0);
-    assert!(rule_fn(&18).len() > 0);
+    assert!(!rule_fn(&17).is_empty());
+    assert!(!rule_fn(&18).is_empty());
     assert!(rule_fn(&19).is_empty());
 }
 
@@ -142,7 +142,7 @@ fn test_rule_builder_greater_than_or_equal() {
         .greater_than_or_equal(18, None::<String>)
         .build();
 
-    assert!(rule_fn(&17).len() > 0);
+    assert!(!rule_fn(&17).is_empty());
     assert!(rule_fn(&18).is_empty());
     assert!(rule_fn(&19).is_empty());
 }
@@ -154,8 +154,8 @@ fn test_rule_builder_less_than() {
         .build();
 
     assert!(rule_fn(&64).is_empty());
-    assert!(rule_fn(&65).len() > 0);
-    assert!(rule_fn(&66).len() > 0);
+    assert!(!rule_fn(&65).is_empty());
+    assert!(!rule_fn(&66).is_empty());
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn test_rule_builder_less_than_or_equal() {
 
     assert!(rule_fn(&64).is_empty());
     assert!(rule_fn(&65).is_empty());
-    assert!(rule_fn(&66).len() > 0);
+    assert!(!rule_fn(&66).is_empty());
 }
 
 #[test]
@@ -175,11 +175,11 @@ fn test_rule_builder_inclusive_between() {
         .inclusive_between(18, 65, None::<String>)
         .build();
 
-    assert!(rule_fn(&17).len() > 0);
+    assert!(!rule_fn(&17).is_empty());
     assert!(rule_fn(&18).is_empty());
     assert!(rule_fn(&50).is_empty());
     assert!(rule_fn(&65).is_empty());
-    assert!(rule_fn(&66).len() > 0);
+    assert!(!rule_fn(&66).is_empty());
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn test_rule_builder_must() {
         .must(|s| s.len() >= 8, "must be at least 8 characters")
         .build();
 
-    assert!(rule_fn(&"short".to_string()).len() > 0);
+    assert!(!rule_fn(&"short".to_string()).is_empty());
     assert!(rule_fn(&"longenough".to_string()).is_empty());
 }
 
@@ -198,7 +198,7 @@ fn test_rule_builder_not_null() {
         .not_null(None::<String>)
         .build();
 
-    assert!(rule_fn(&None::<String>).len() > 0);
+    assert!(!rule_fn(&None::<String>).is_empty());
     assert!(rule_fn(&Some("value".to_string())).is_empty());
 }
 
@@ -210,11 +210,11 @@ fn test_rule_builder_chaining() {
         .max_length(10, None::<String>)
         .build();
 
-    assert!(rule_fn(&"".to_string()).len() > 0); // empty
-    assert!(rule_fn(&"ab".to_string()).len() > 0); // too short
+    assert!(!rule_fn(&"".to_string()).is_empty()); // empty
+    assert!(!rule_fn(&"ab".to_string()).is_empty()); // too short
     assert!(rule_fn(&"abc".to_string()).is_empty()); // valid
     assert!(rule_fn(&"abcdefghij".to_string()).is_empty()); // valid (max)
-    assert!(rule_fn(&"abcdefghijk".to_string()).len() > 0); // too long
+    assert!(!rule_fn(&"abcdefghijk".to_string()).is_empty()); // too long
 }
 
 // ValidatorBuilder tests
@@ -354,7 +354,7 @@ fn test_rule_builder_custom_rule() {
         })
         .build();
 
-    assert!(rule_fn(&"forbidden word".to_string()).len() > 0);
+    assert!(!rule_fn(&"forbidden word".to_string()).is_empty());
     assert!(rule_fn(&"allowed word".to_string()).is_empty());
 }
 
@@ -364,7 +364,7 @@ fn test_numeric_trait_implementations() {
     assert_eq!(10i32.to_f64(), 10.0);
     assert_eq!(20u32.to_f64(), 20.0);
     // f32 to f64 conversion may have slight precision differences
-    assert!((3.14f32.to_f64() - 3.14).abs() < 0.0001);
+    assert!((1.23f32.to_f64() - 1.23f64).abs() < 0.0001);
     assert_eq!(2.71f64.to_f64(), 2.71);
 }
 
@@ -373,7 +373,7 @@ fn test_option_like_trait() {
     let some: Option<String> = Some("value".to_string());
     let none: Option<String> = None;
 
-    assert!(!some.is_none());
+    assert!(some.is_some());
     assert!(none.is_none());
 }
 

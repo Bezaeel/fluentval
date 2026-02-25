@@ -2,9 +2,11 @@ use crate::error::{ValidationError, ValidationResult};
 use crate::rule::RuleBuilder;
 use crate::traits::Validator;
 
+type RuleFn<T> = Box<dyn Fn(&T) -> Vec<ValidationError>>;
+
 /// Helper struct to build validators in a fluent style
 pub struct ValidatorBuilder<T> {
-    rules: Vec<Box<dyn Fn(&T) -> Vec<ValidationError>>>,
+    rules: Vec<RuleFn<T>>,
 }
 
 impl<T> ValidatorBuilder<T> {
@@ -82,7 +84,7 @@ impl<T> Default for ValidatorBuilder<T> {
 }
 
 struct ValidatorImpl<T> {
-    rules: Vec<Box<dyn Fn(&T) -> Vec<ValidationError>>>,
+    rules: Vec<RuleFn<T>>,
 }
 
 impl<T> Validator<T> for ValidatorImpl<T> {
