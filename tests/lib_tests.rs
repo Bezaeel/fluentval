@@ -596,3 +596,181 @@ fn test_validator_builder_must_with_country_validation() {
     assert!(result.is_valid());
 }
 
+// ── FluentValidator v1 API tests ─────────────────────────────────────────────
+
+#[test]
+fn test_fluent_validator_basic_string_rules() {
+    #[derive(Debug)]
+    struct User {
+        name: String,
+        email: String,
+    }
+
+    let v = FluentValidator::<User>::new();
+    rule_for!(v, u.name).not_empty(None::<String>).min_length(2, None::<String>);
+    rule_for!(v, u.email).not_empty(None::<String>).email(None::<String>);
+    let validator = v.build();
+
+    let result = validate(&User { name: "Jo".into(), email: "jo@example.com".into() }, &validator);
+    assert!(result.is_valid());
+
+    let result = validate(&User { name: "".into(), email: "not-an-email".into() }, &validator);
+    assert!(!result.is_valid());
+    assert!(result.errors().iter().any(|e| e.property == "name"));
+    assert!(result.errors().iter().any(|e| e.property == "email"));
+}
+
+#[test]
+fn test_fluent_validator_numeric_rules() {
+    #[derive(Debug)]
+    struct Product {
+        price: f64,
+        quantity: i32,
+    }
+
+    let v = FluentValidator::<Product>::new();
+    rule_for!(v, p.price).greater_than(0.0, None::<String>).less_than_or_equal(1000.0, None::<String>);
+    rule_for!(v, p.quantity).greater_than_or_equal(1, None::<String>).inclusive_between(1, 100, None::<String>);
+    let validator = v.build();
+
+    let result = validate(&Product { price: 50.0, quantity: 10 }, &validator);
+    assert!(result.is_valid());
+
+    let result = validate(&Product { price: -1.0, quantity: 0 }, &validator);
+    assert!(!result.is_valid());
+    assert!(result.errors().iter().any(|e| e.property == "price"));
+    assert!(result.errors().iter().any(|e| e.property == "quantity"));
+}
+
+#[test]
+fn test_fluent_validator_must_cross_property() {
+    #[derive(Debug)]
+    struct Request {
+        phone: String,
+        alt_phone: String,
+    }
+
+    let v = FluentValidator::<Request>::new();
+    rule_for!(v, r.phone).not_empty(None::<String>);
+    rule_for!(v, r.alt_phone)
+        .not_empty(None::<String>)
+        .must(|req, val| val != &req.phone, "alternative phone must differ from primary");
+    let validator = v.build();
+
+    let result = validate(
+        &Request { phone: "111".into(), alt_phone: "222".into() },
+        &validator,
+    );
+    assert!(result.is_valid());
+
+    let result = validate(
+        &Request { phone: "111".into(), alt_phone: "111".into() },
+        &validator,
+    );
+    assert!(!result.is_valid());
+    assert!(result.errors().iter().any(|e| e.property == "alt_phone"));
+}
+
+#[test]
+fn test_fluent_validator_must_value_only() {
+    #[derive(Debug)]
+    struct Form {
+        password: String,
+    }
+
+    let v = FluentValidator::<Form>::new();
+    rule_for!(v, f.password)
+        .min_length(8, None::<String>)
+        .must(|_, p| p.chars().any(|c| c.is_ascii_digit()), "must contain a digit");
+    let validator = v.build();
+
+    let result = validate(&Form { password: "Secret1!".into() }, &validator);
+    assert!(result.is_valid());
+
+    let result = validate(&Form { password: "NoDigits!".into() }, &validator);
+    assert!(!result.is_valid());
+    assert_eq!(result.errors()[0].property, "password");
+}
+
+#[test]
+fn test_fluent_validator_rules_accumulate_across_statements() {
+    #[derive(Debug)]
+    struct User {
+        name: String,
+    }
+
+    let v = FluentValidator::<User>::new();
+    rule_for!(v, u.name).not_empty(None::<String>);
+    rule_for!(v, u.name).max_length(5, None::<String>);
+    let validator = v.build();
+
+    assert!(validate(&User { name: "Ada".into() }, &validator).is_valid());
+    assert!(!validate(&User { name: "".into() }, &validator).is_valid());
+    assert!(!validate(&User { name: "TooLongName".into() }, &validator).is_valid());
+}
+
+#[test]
+fn test_fluent_validator_empty_is_valid() {
+    #[derive(Debug)]
+    struct Foo { #[allow(dead_code)] value: i32 }
+
+    let validator = FluentValidator::<Foo>::new().build();
+    assert!(validate(&Foo { value: 42 }, &validator).is_valid());
+}
+
+#[test]
+fn test_fluent_validator_default() {
+    #[derive(Debug)]
+    struct Foo { #[allow(dead_code)] value: i32 }
+
+    let validator = FluentValidator::<Foo>::default().build();
+    assert!(validate(&Foo { value: 0 }, &validator).is_valid());
+}
+
+#[test]
+fn test_fluent_validator_custom_property_label() {
+    #[derive(Debug)]
+    struct Cmd { tax_id: String }
+
+    let v = FluentValidator::<Cmd>::new();
+    v.rule_for("taxId", |c| &c.tax_id).not_empty(None::<String>);
+    let validator = v.build();
+
+    let result = validate(&Cmd { tax_id: "".into() }, &validator);
+    assert!(!result.is_valid());
+    assert_eq!(result.errors()[0].property, "taxId");
+}
+
+#[test]
+fn test_fluent_validator_nested_field_macro() {
+    #[derive(Debug)]
+    struct Address { city: String }
+    #[derive(Debug)]
+    struct Person { address: Address }
+
+    let v = FluentValidator::<Person>::new();
+    rule_for!(v, p.address.city).not_empty(None::<String>);
+    let validator = v.build();
+
+    let result = validate(&Person { address: Address { city: "".into() } }, &validator);
+    assert!(!result.is_valid());
+    assert_eq!(result.errors()[0].property, "address.city");
+
+    let result = validate(&Person { address: Address { city: "London".into() } }, &validator);
+    assert!(result.is_valid());
+}
+
+#[test]
+fn test_fluent_validator_custom_messages() {
+    #[derive(Debug)]
+    struct Form { name: String, age: i32 }
+
+    let v = FluentValidator::<Form>::new();
+    rule_for!(v, f.name).not_empty(Some("name is required"));
+    rule_for!(v, f.age).greater_than_or_equal(18, Some("must be an adult"));
+    let validator = v.build();
+
+    let result = validate(&Form { name: "".into(), age: 15 }, &validator);
+    assert_eq!(result.first_error_for("name"), Some("name is required"));
+    assert_eq!(result.first_error_for("age"), Some("must be an adult"));
+}
