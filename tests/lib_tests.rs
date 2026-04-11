@@ -227,14 +227,20 @@ fn test_validator_builder_simple() {
     }
 
     let validator = ValidatorBuilder::<User>::new()
-        .rule_for("name", |u| &u.name,
+        .rule_for(
+            "name",
+            |u| &u.name,
             RuleBuilder::for_property("name")
                 .not_empty(None::<String>)
-                .min_length(2, None::<String>))
-        .rule_for("email", |u| &u.email,
+                .min_length(2, None::<String>),
+        )
+        .rule_for(
+            "email",
+            |u| &u.email,
             RuleBuilder::for_property("email")
                 .not_empty(None::<String>)
-                .email(None::<String>))
+                .email(None::<String>),
+        )
         .build();
 
     let valid_user = User {
@@ -264,14 +270,20 @@ fn test_validator_builder_numeric() {
     }
 
     let validator = ValidatorBuilder::<Product>::new()
-        .rule_for("price", |p| &p.price,
+        .rule_for(
+            "price",
+            |p| &p.price,
             RuleBuilder::for_property("price")
                 .greater_than(0.0, None::<String>)
-                .less_than_or_equal(1000.0, None::<String>))
-        .rule_for("quantity", |p| &p.quantity,
+                .less_than_or_equal(1000.0, None::<String>),
+        )
+        .rule_for(
+            "quantity",
+            |p| &p.quantity,
             RuleBuilder::for_property("quantity")
                 .greater_than_or_equal(0, None::<String>)
-                .inclusive_between(0, 100, None::<String>))
+                .inclusive_between(0, 100, None::<String>),
+        )
         .build();
 
     let valid_product = Product {
@@ -301,25 +313,31 @@ fn test_validator_builder_multiple_errors() {
     }
 
     let validator = ValidatorBuilder::<User>::new()
-        .rule_for("name", |u| &u.name,
+        .rule_for(
+            "name",
+            |u| &u.name,
             RuleBuilder::for_property("name")
                 .not_empty(None::<String>)
                 .min_length(5, None::<String>)
-                .max_length(10, None::<String>))
-        .rule_for("age", |u| &u.age,
+                .max_length(10, None::<String>),
+        )
+        .rule_for(
+            "age",
+            |u| &u.age,
             RuleBuilder::for_property("age")
                 .greater_than_or_equal(18, None::<String>)
-                .less_than_or_equal(120, None::<String>))
+                .less_than_or_equal(120, None::<String>),
+        )
         .build();
 
     let invalid_user = User {
         name: "ab".to_string(), // too short
-        age: 15, // too young
+        age: 15,                // too young
     };
 
     let result = validate(&invalid_user, &validator);
     assert!(!result.is_valid());
-    
+
     let errors_by_prop = result.errors_by_property();
     assert!(errors_by_prop.contains_key("name"));
     assert!(errors_by_prop.contains_key("age"));
@@ -410,13 +428,19 @@ fn test_rule_builder_custom_messages() {
     let rule_fn = RuleBuilder::<String>::for_property("name")
         .max_length(3, Some("custom max length"))
         .build();
-    assert_eq!(rule_fn(&"abcdef".to_string())[0].message, "custom max length");
+    assert_eq!(
+        rule_fn(&"abcdef".to_string())[0].message,
+        "custom max length"
+    );
 
     // email with custom message
     let rule_fn = RuleBuilder::<String>::for_property("email")
         .email(Some("custom email error"))
         .build();
-    assert_eq!(rule_fn(&"invalid".to_string())[0].message, "custom email error");
+    assert_eq!(
+        rule_fn(&"invalid".to_string())[0].message,
+        "custom email error"
+    );
 
     // greater_than with custom message
     let rule_fn = RuleBuilder::<i32>::for_property("age")
@@ -482,21 +506,31 @@ fn test_validator_builder_must_with_object() {
     }
 
     let validator = ValidatorBuilder::<Command>::new()
-        .rule_for("phoneNumber", |c| &c.phone_number,
-            RuleBuilder::for_property("phoneNumber")
-                .not_empty(None::<String>))
-        .must("phoneNumber", |c| &c.phone_number,
-            |command, phone_number| is_valid_phone_number_for_country(phone_number, &command.country_iso_code),
-            "Phone number is not valid for the specified country")
-        .must("altPhoneNumber", |c| &c.alt_phone_number,
+        .rule_for(
+            "phoneNumber",
+            |c| &c.phone_number,
+            RuleBuilder::for_property("phoneNumber").not_empty(None::<String>),
+        )
+        .must(
+            "phoneNumber",
+            |c| &c.phone_number,
+            |command, phone_number| {
+                is_valid_phone_number_for_country(phone_number, &command.country_iso_code)
+            },
+            "Phone number is not valid for the specified country",
+        )
+        .must(
+            "altPhoneNumber",
+            |c| &c.alt_phone_number,
             |command, alt_phone| alt_phone != &command.phone_number,
-            "Alternative phone number must be different from primary phone number")
+            "Alternative phone number must be different from primary phone number",
+        )
         .build();
 
     // Test invalid: phone number doesn't match country
     let invalid_command = Command {
         country_iso_code: "US".to_string(),
-        phone_number: "123".to_string(),  // Too short for US
+        phone_number: "123".to_string(), // Too short for US
         alt_phone_number: "9876543210".to_string(),
     };
 
@@ -508,18 +542,21 @@ fn test_validator_builder_must_with_object() {
     let invalid_command2 = Command {
         country_iso_code: "US".to_string(),
         phone_number: "1234567890".to_string(),
-        alt_phone_number: "1234567890".to_string(),  // Same as primary
+        alt_phone_number: "1234567890".to_string(), // Same as primary
     };
 
     let result = validate(&invalid_command2, &validator);
     assert!(!result.is_valid());
-    assert!(result.errors().iter().any(|e| e.property == "altPhoneNumber"));
+    assert!(result
+        .errors()
+        .iter()
+        .any(|e| e.property == "altPhoneNumber"));
 
     // Test valid
     let valid_command = Command {
         country_iso_code: "US".to_string(),
-        phone_number: "1234567890".to_string(),  // Valid US phone
-        alt_phone_number: "9876543210".to_string(),  // Valid and different
+        phone_number: "1234567890".to_string(), // Valid US phone
+        alt_phone_number: "9876543210".to_string(), // Valid and different
     };
 
     let result = validate(&valid_command, &validator);
@@ -554,18 +591,24 @@ fn test_validator_builder_must_with_country_validation() {
 
     let validator = ValidatorBuilder::<Command>::new()
         // Example 1: Validate country ignoring the object (use _ for object parameter)
-        .must("country", |c| &c.country,
+        .must(
+            "country",
+            |c| &c.country,
             |_, country| Countries::allowed_countries().contains(&country.as_str()),
-            "Country is not in the allowed list")
+            "Country is not in the allowed list",
+        )
         // Example 2: Validate tax number using both object and property value
-        .must("taxNumber", |c| &c.tax_number,
+        .must(
+            "taxNumber",
+            |c| &c.tax_number,
             |command, tax_number| is_valid_tax_number(tax_number, &command.country_iso_code),
-            "Tax number is not valid for the specified country")
+            "Tax number is not valid for the specified country",
+        )
         .build();
 
     // Test invalid: country not in allowed list
     let invalid_command = Command {
-        country: "FR".to_string(),  // Not in allowed list
+        country: "FR".to_string(), // Not in allowed list
         tax_number: "123456789".to_string(),
         country_iso_code: "US".to_string(),
     };
@@ -577,7 +620,7 @@ fn test_validator_builder_must_with_country_validation() {
     // Test invalid: tax number doesn't match country
     let invalid_command2 = Command {
         country: "US".to_string(),
-        tax_number: "123".to_string(),  // Too short for US
+        tax_number: "123".to_string(), // Too short for US
         country_iso_code: "US".to_string(),
     };
 
@@ -587,8 +630,8 @@ fn test_validator_builder_must_with_country_validation() {
 
     // Test valid
     let valid_command = Command {
-        country: "US".to_string(),  // In allowed list
-        tax_number: "123456789".to_string(),  // Valid US tax number
+        country: "US".to_string(),           // In allowed list
+        tax_number: "123456789".to_string(), // Valid US tax number
         country_iso_code: "US".to_string(),
     };
 
@@ -607,14 +650,30 @@ fn test_fluent_validator_basic_string_rules() {
     }
 
     let v = FluentValidator::<User>::new();
-    rule_for!(v, u.name).not_empty(None::<String>).min_length(2, None::<String>);
-    rule_for!(v, u.email).not_empty(None::<String>).email(None::<String>);
+    rule_for!(v, u.name)
+        .not_empty(None::<String>)
+        .min_length(2, None::<String>);
+    rule_for!(v, u.email)
+        .not_empty(None::<String>)
+        .email(None::<String>);
     let validator = v.build();
 
-    let result = validate(&User { name: "Jo".into(), email: "jo@example.com".into() }, &validator);
+    let result = validate(
+        &User {
+            name: "Jo".into(),
+            email: "jo@example.com".into(),
+        },
+        &validator,
+    );
     assert!(result.is_valid());
 
-    let result = validate(&User { name: "".into(), email: "not-an-email".into() }, &validator);
+    let result = validate(
+        &User {
+            name: "".into(),
+            email: "not-an-email".into(),
+        },
+        &validator,
+    );
     assert!(!result.is_valid());
     assert!(result.errors().iter().any(|e| e.property == "name"));
     assert!(result.errors().iter().any(|e| e.property == "email"));
@@ -629,14 +688,30 @@ fn test_fluent_validator_numeric_rules() {
     }
 
     let v = FluentValidator::<Product>::new();
-    rule_for!(v, p.price).greater_than(0.0, None::<String>).less_than_or_equal(1000.0, None::<String>);
-    rule_for!(v, p.quantity).greater_than_or_equal(1, None::<String>).inclusive_between(1, 100, None::<String>);
+    rule_for!(v, p.price)
+        .greater_than(0.0, None::<String>)
+        .less_than_or_equal(1000.0, None::<String>);
+    rule_for!(v, p.quantity)
+        .greater_than_or_equal(1, None::<String>)
+        .inclusive_between(1, 100, None::<String>);
     let validator = v.build();
 
-    let result = validate(&Product { price: 50.0, quantity: 10 }, &validator);
+    let result = validate(
+        &Product {
+            price: 50.0,
+            quantity: 10,
+        },
+        &validator,
+    );
     assert!(result.is_valid());
 
-    let result = validate(&Product { price: -1.0, quantity: 0 }, &validator);
+    let result = validate(
+        &Product {
+            price: -1.0,
+            quantity: 0,
+        },
+        &validator,
+    );
     assert!(!result.is_valid());
     assert!(result.errors().iter().any(|e| e.property == "price"));
     assert!(result.errors().iter().any(|e| e.property == "quantity"));
@@ -652,19 +727,26 @@ fn test_fluent_validator_must_cross_property() {
 
     let v = FluentValidator::<Request>::new();
     rule_for!(v, r.phone).not_empty(None::<String>);
-    rule_for!(v, r.alt_phone)
-        .not_empty(None::<String>)
-        .must(|req, val| val != &req.phone, "alternative phone must differ from primary");
+    rule_for!(v, r.alt_phone).not_empty(None::<String>).must(
+        |req, val| val != &req.phone,
+        "alternative phone must differ from primary",
+    );
     let validator = v.build();
 
     let result = validate(
-        &Request { phone: "111".into(), alt_phone: "222".into() },
+        &Request {
+            phone: "111".into(),
+            alt_phone: "222".into(),
+        },
         &validator,
     );
     assert!(result.is_valid());
 
     let result = validate(
-        &Request { phone: "111".into(), alt_phone: "111".into() },
+        &Request {
+            phone: "111".into(),
+            alt_phone: "111".into(),
+        },
         &validator,
     );
     assert!(!result.is_valid());
@@ -679,15 +761,26 @@ fn test_fluent_validator_must_value_only() {
     }
 
     let v = FluentValidator::<Form>::new();
-    rule_for!(v, f.password)
-        .min_length(8, None::<String>)
-        .must(|_, p| p.chars().any(|c| c.is_ascii_digit()), "must contain a digit");
+    rule_for!(v, f.password).min_length(8, None::<String>).must(
+        |_, p| p.chars().any(|c| c.is_ascii_digit()),
+        "must contain a digit",
+    );
     let validator = v.build();
 
-    let result = validate(&Form { password: "Secret1!".into() }, &validator);
+    let result = validate(
+        &Form {
+            password: "Secret1!".into(),
+        },
+        &validator,
+    );
     assert!(result.is_valid());
 
-    let result = validate(&Form { password: "NoDigits!".into() }, &validator);
+    let result = validate(
+        &Form {
+            password: "NoDigits!".into(),
+        },
+        &validator,
+    );
     assert!(!result.is_valid());
     assert_eq!(result.errors()[0].property, "password");
 }
@@ -706,13 +799,22 @@ fn test_fluent_validator_rules_accumulate_across_statements() {
 
     assert!(validate(&User { name: "Ada".into() }, &validator).is_valid());
     assert!(!validate(&User { name: "".into() }, &validator).is_valid());
-    assert!(!validate(&User { name: "TooLongName".into() }, &validator).is_valid());
+    assert!(!validate(
+        &User {
+            name: "TooLongName".into()
+        },
+        &validator
+    )
+    .is_valid());
 }
 
 #[test]
 fn test_fluent_validator_empty_is_valid() {
     #[derive(Debug)]
-    struct Foo { #[allow(dead_code)] value: i32 }
+    struct Foo {
+        #[allow(dead_code)]
+        value: i32,
+    }
 
     let validator = FluentValidator::<Foo>::new().build();
     assert!(validate(&Foo { value: 42 }, &validator).is_valid());
@@ -721,7 +823,10 @@ fn test_fluent_validator_empty_is_valid() {
 #[test]
 fn test_fluent_validator_default() {
     #[derive(Debug)]
-    struct Foo { #[allow(dead_code)] value: i32 }
+    struct Foo {
+        #[allow(dead_code)]
+        value: i32,
+    }
 
     let validator = FluentValidator::<Foo>::default().build();
     assert!(validate(&Foo { value: 0 }, &validator).is_valid());
@@ -730,7 +835,9 @@ fn test_fluent_validator_default() {
 #[test]
 fn test_fluent_validator_custom_property_label() {
     #[derive(Debug)]
-    struct Cmd { tax_id: String }
+    struct Cmd {
+        tax_id: String,
+    }
 
     let v = FluentValidator::<Cmd>::new();
     v.rule_for("taxId", |c| &c.tax_id).not_empty(None::<String>);
@@ -744,33 +851,58 @@ fn test_fluent_validator_custom_property_label() {
 #[test]
 fn test_fluent_validator_nested_field_macro() {
     #[derive(Debug)]
-    struct Address { city: String }
+    struct Address {
+        city: String,
+    }
     #[derive(Debug)]
-    struct Person { address: Address }
+    struct Person {
+        address: Address,
+    }
 
     let v = FluentValidator::<Person>::new();
     rule_for!(v, p.address.city).not_empty(None::<String>);
     let validator = v.build();
 
-    let result = validate(&Person { address: Address { city: "".into() } }, &validator);
+    let result = validate(
+        &Person {
+            address: Address { city: "".into() },
+        },
+        &validator,
+    );
     assert!(!result.is_valid());
     assert_eq!(result.errors()[0].property, "address.city");
 
-    let result = validate(&Person { address: Address { city: "London".into() } }, &validator);
+    let result = validate(
+        &Person {
+            address: Address {
+                city: "London".into(),
+            },
+        },
+        &validator,
+    );
     assert!(result.is_valid());
 }
 
 #[test]
 fn test_fluent_validator_custom_messages() {
     #[derive(Debug)]
-    struct Form { name: String, age: i32 }
+    struct Form {
+        name: String,
+        age: i32,
+    }
 
     let v = FluentValidator::<Form>::new();
     rule_for!(v, f.name).not_empty(Some("name is required"));
     rule_for!(v, f.age).greater_than_or_equal(18, Some("must be an adult"));
     let validator = v.build();
 
-    let result = validate(&Form { name: "".into(), age: 15 }, &validator);
+    let result = validate(
+        &Form {
+            name: "".into(),
+            age: 15,
+        },
+        &validator,
+    );
     assert_eq!(result.first_error_for("name"), Some("name is required"));
     assert_eq!(result.first_error_for("age"), Some("must be an adult"));
 }
