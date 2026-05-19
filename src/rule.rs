@@ -1,39 +1,193 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::error::ValidationError;
-use crate::traits::{Numeric, OptionLike};
+use crate::traits::{NotOption, Numeric, OptionLike};
 
-/// Rule function type that validates a value and returns an optional error message
-pub type Rule<T> = Box<dyn Fn(&T) -> Option<String>>;
+pub(crate) type ParentRules<T> = Rc<RefCell<Vec<Box<dyn Fn(&T) -> Vec<ValidationError>>>>>;
 
-/// Builder for creating validation rules in a fluent style
-pub struct RuleBuilder<T> {
+/// Builder for validation rules.
+///
+/// Carries both the struct type `T` (the object being validated) and the field type `V`
+/// (the property under inspection). Build with [`for_property`](Self::for_property), passing
+/// the property name and an accessor closure `|t: &T| &t.field`.
+///
+/// For a rule on a bare value (no surrounding struct), pass an identity accessor
+/// `|v: &V| v` — `T` and `V` both infer to the value's type.
+///
+/// # Standalone
+/// ```rust,ignore
+/// // Value-only rule (identity accessor):
+/// let rule = RuleBuilder::for_property("name", |s: &String| s)
+///     .not_empty(None::<String>)
+///     .min_length(2, None::<String>)
+///     .build();
+/// let errors = rule(&"".to_string());
+///
+/// // Struct-aware (cross-property):
+/// let rule = RuleBuilder::for_property("alt_phone", |c: &Request| &c.alt_phone)
+///     .not_empty(None::<String>)
+///     .must(|c, v| v != &c.primary_phone, "alt phone cannot match primary")
+///     .build();
+/// let errors = rule(&Request { alt_phone: "x".into(), primary_phone: "x".into() });
+/// ```
+///
+/// # Inside a `FluentValidator`
+/// Rules registered via [`FluentValidator::rule_for`](crate::FluentValidator::rule_for) hold
+/// a reference to the validator and self-register when the builder is dropped (at the `;`
+/// ending the statement) — no `.build()` call required.
+pub struct RuleBuilder<T: 'static, V: 'static> {
     property_name: String,
-    rules: Vec<Rule<T>>,
+    accessor: Option<Box<dyn Fn(&T) -> &V + 'static>>,
+    value_rules: Vec<Box<dyn Fn(&V) -> Option<String>>>,
+    cross_rules: Vec<Box<dyn Fn(&T, &V) -> Option<String>>>,
+    condition: Option<Box<dyn Fn(&T) -> bool + 'static>>,
+    parent_rules: Option<ParentRules<T>>,
 }
 
-impl<T> RuleBuilder<T> {
-    /// Create a new rule builder for a property
-    pub fn for_property(property_name: impl Into<String>) -> Self {
+impl<T: 'static, V: 'static> RuleBuilder<T, V> {
+    /// Create a builder for a property accessed via a closure.
+    ///
+    /// Use this when validating a field of a struct, especially when you need cross-property
+    /// access via [`must`](Self::must).
+    pub fn for_property<F>(property_name: impl Into<String>, accessor: F) -> Self
+    where
+        F: Fn(&T) -> &V + 'static,
+    {
         Self {
             property_name: property_name.into(),
-            rules: Vec::new(),
+            accessor: Some(Box::new(accessor)),
+            value_rules: Vec::new(),
+            cross_rules: Vec::new(),
+            condition: None,
+            parent_rules: None,
         }
     }
 
-    /// Add a custom rule
-    pub fn rule(mut self, rule: impl Fn(&T) -> Option<String> + 'static) -> Self {
-        self.rules.push(Box::new(rule));
+    pub(crate) fn with_parent(mut self, parent: ParentRules<T>) -> Self {
+        self.parent_rules = Some(parent);
         self
     }
 
-    /// Validate that the value is not empty (for strings)
-    /// 
-    /// # Arguments
-    /// * `message` - Optional custom error message. If not provided, uses default message.
-    pub fn not_empty(self, message: Option<impl Into<String>>) -> Self
-    where
-        T: AsRef<str>,
-    {
-        let msg = message.map(|m| m.into()).unwrap_or_else(|| "must not be empty".to_string());
+    /// Add a custom value-level rule.
+    pub fn rule(mut self, rule: impl Fn(&V) -> Option<String> + 'static) -> Self {
+        self.value_rules.push(Box::new(rule));
+        self
+    }
+
+    /// Gate the entire rule chain on a struct-level condition.
+    ///
+    /// When the predicate returns `false`, no rules on this builder fire — the property is
+    /// treated as valid. Useful for conditional requirements like "billing address is
+    /// required only when payment_method is CARD".
+    ///
+    /// Calling `.when(...)` multiple times ANDs the predicates together; order in the chain
+    /// does not matter — the condition gates every rule registered on this builder.
+    pub fn when(mut self, predicate: impl Fn(&T) -> bool + 'static) -> Self {
+        let predicate: Box<dyn Fn(&T) -> bool + 'static> = Box::new(predicate);
+        self.condition = Some(match self.condition.take() {
+            Some(existing) => Box::new(move |t| existing(t) && predicate(t)),
+            None => predicate,
+        });
+        self
+    }
+
+    /// Add a cross-property rule. The predicate receives the full object and the field value.
+    pub fn must(
+        mut self,
+        predicate: impl Fn(&T, &V) -> bool + 'static,
+        message: impl Into<String>,
+    ) -> Self {
+        let msg = message.into();
+        self.cross_rules.push(Box::new(move |t, v| {
+            if !predicate(t, v) {
+                Some(msg.clone())
+            } else {
+                None
+            }
+        }));
+        self
+    }
+
+    /// Build the rule chain into a function `Fn(&T) -> Vec<ValidationError>`.
+    ///
+    /// Consumes the builder; suppresses the auto-registration that would otherwise occur
+    /// when a builder bound to a [`FluentValidator`](crate::FluentValidator) is dropped.
+    pub fn build(mut self) -> impl Fn(&T) -> Vec<ValidationError> {
+        self.parent_rules = None;
+        let property_name = std::mem::take(&mut self.property_name);
+        let accessor = self.accessor.take().expect("RuleBuilder accessor missing");
+        let value_rules = std::mem::take(&mut self.value_rules);
+        let cross_rules = std::mem::take(&mut self.cross_rules);
+        let condition = self.condition.take();
+
+        move |instance: &T| {
+            if let Some(cond) = &condition {
+                if !cond(instance) {
+                    return Vec::new();
+                }
+            }
+            let value = accessor(instance);
+            let mut errors = Vec::new();
+            for r in &value_rules {
+                if let Some(message) = r(value) {
+                    errors.push(ValidationError::new(property_name.clone(), message));
+                }
+            }
+            for r in &cross_rules {
+                if let Some(message) = r(instance, value) {
+                    errors.push(ValidationError::new(property_name.clone(), message));
+                }
+            }
+            errors
+        }
+    }
+}
+
+impl<T: 'static, V: 'static> Drop for RuleBuilder<T, V> {
+    fn drop(&mut self) {
+        let Some(parent) = self.parent_rules.take() else {
+            return;
+        };
+        let Some(accessor) = self.accessor.take() else {
+            return;
+        };
+        let property_name = std::mem::take(&mut self.property_name);
+        let value_rules = std::mem::take(&mut self.value_rules);
+        let cross_rules = std::mem::take(&mut self.cross_rules);
+        let condition = self.condition.take();
+
+        let rule_fn = move |instance: &T| {
+            if let Some(cond) = &condition {
+                if !cond(instance) {
+                    return Vec::new();
+                }
+            }
+            let value = accessor(instance);
+            let mut errors = Vec::new();
+            for r in &value_rules {
+                if let Some(message) = r(value) {
+                    errors.push(ValidationError::new(property_name.clone(), message));
+                }
+            }
+            for r in &cross_rules {
+                if let Some(message) = r(instance, value) {
+                    errors.push(ValidationError::new(property_name.clone(), message));
+                }
+            }
+            errors
+        };
+        parent.borrow_mut().push(Box::new(rule_fn));
+    }
+}
+
+// ── String rules ─────────────────────────────────────────────────────────────
+
+impl<T: 'static, V: AsRef<str> + NotOption + 'static> RuleBuilder<T, V> {
+    pub fn not_empty(self, message: Option<impl Into<String>>) -> Self {
+        let msg = message
+            .map(|m| m.into())
+            .unwrap_or_else(|| "must not be empty".to_string());
         self.rule(move |value| {
             if value.as_ref().trim().is_empty() {
                 Some(msg.clone())
@@ -43,15 +197,75 @@ impl<T> RuleBuilder<T> {
         })
     }
 
-    /// Validate that the value is not null/empty (for Option types)
-    /// 
-    /// # Arguments
-    /// * `message` - Optional custom error message. If not provided, uses default message.
-    pub fn not_null(self, message: Option<impl Into<String>>) -> Self
-    where
-        T: OptionLike,
-    {
-        let msg = message.map(|m| m.into()).unwrap_or_else(|| "must not be null".to_string());
+    pub fn min_length(
+        self,
+        min: usize,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let msg = message.map(|m| m.into());
+        self.rule(move |value| {
+            if value.as_ref().len() < min {
+                Some(
+                    msg.clone()
+                        .unwrap_or_else(|| format!("must be at least {} characters long", min)),
+                )
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn max_length(
+        self,
+        max: usize,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let msg = message.map(|m| m.into());
+        self.rule(move |value| {
+            if value.as_ref().len() > max {
+                Some(
+                    msg.clone()
+                        .unwrap_or_else(|| format!("must be at most {} characters long", max)),
+                )
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn length(
+        self,
+        min: usize,
+        max: usize,
+        min_message: Option<impl Into<String> + Clone + 'static>,
+        max_message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        self.min_length(min, min_message).max_length(max, max_message)
+    }
+
+    pub fn email(self, message: Option<impl Into<String>>) -> Self {
+        let msg = message
+            .map(|m| m.into())
+            .unwrap_or_else(|| "must be a valid email address".to_string());
+        self.rule(move |value| {
+            let email_regex =
+                regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
+            if !email_regex.is_match(value.as_ref()) {
+                Some(msg.clone())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+// ── Option rules ─────────────────────────────────────────────────────────────
+
+impl<T: 'static, V: OptionLike + 'static> RuleBuilder<T, V> {
+    pub fn not_null(self, message: Option<impl Into<String>>) -> Self {
+        let msg = message
+            .map(|m| m.into())
+            .unwrap_or_else(|| "must not be null".to_string());
         self.rule(move |value| {
             if value.is_none() {
                 Some(msg.clone())
@@ -60,211 +274,266 @@ impl<T> RuleBuilder<T> {
             }
         })
     }
+}
 
-    /// Validate minimum length
-    /// 
-    /// # Arguments
-    /// * `min` - Minimum length required
-    /// * `message` - Optional custom error message. If not provided, uses default message with the min value.
-    pub fn min_length(self, min: usize, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: AsRef<str>,
-    {
-        let msg = message.map(|m| m.into());
-        self.rule(move |value| {
-            let len = value.as_ref().len();
-            if len < min {
-                Some(msg.clone().unwrap_or_else(|| format!("must be at least {} characters long", min)))
-            } else {
-                None
-            }
+// ── Option-transparent string rules ──────────────────────────────────────────
+//
+// When the field is `Option<V>` with `V: AsRef<str>`, string rules apply only if the value
+// is `Some(_)`. A `None` value passes — pair with `not_null` if presence is required.
+
+impl<T: 'static, V: AsRef<str> + 'static> RuleBuilder<T, Option<V>> {
+    pub fn not_empty(self, message: Option<impl Into<String>>) -> Self {
+        let msg = message
+            .map(|m| m.into())
+            .unwrap_or_else(|| "must not be empty".to_string());
+        self.rule(move |opt| match opt {
+            Some(v) if v.as_ref().trim().is_empty() => Some(msg.clone()),
+            _ => None,
         })
     }
 
-    /// Validate maximum length
-    /// 
-    /// # Arguments
-    /// * `max` - Maximum length allowed
-    /// * `message` - Optional custom error message. If not provided, uses default message with the max value.
-    pub fn max_length(self, max: usize, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: AsRef<str>,
-    {
+    pub fn min_length(
+        self,
+        min: usize,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         let msg = message.map(|m| m.into());
-        self.rule(move |value| {
-            let len = value.as_ref().len();
-            if len > max {
-                Some(msg.clone().unwrap_or_else(|| format!("must be at most {} characters long", max)))
-            } else {
-                None
-            }
+        self.rule(move |opt| match opt {
+            Some(v) if v.as_ref().len() < min => Some(
+                msg.clone()
+                    .unwrap_or_else(|| format!("must be at least {} characters long", min)),
+            ),
+            _ => None,
         })
     }
 
-    /// Validate length range
-    /// 
-    /// # Arguments
-    /// * `min` - Minimum length required
-    /// * `max` - Maximum length allowed
-    /// * `min_message` - Optional custom error message for minimum length violation
-    /// * `max_message` - Optional custom error message for maximum length violation
-    pub fn length(self, min: usize, max: usize, min_message: Option<impl Into<String> + Clone + 'static>, max_message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: AsRef<str>,
-    {
+    pub fn max_length(
+        self,
+        max: usize,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let msg = message.map(|m| m.into());
+        self.rule(move |opt| match opt {
+            Some(v) if v.as_ref().len() > max => Some(
+                msg.clone()
+                    .unwrap_or_else(|| format!("must be at most {} characters long", max)),
+            ),
+            _ => None,
+        })
+    }
+
+    pub fn length(
+        self,
+        min: usize,
+        max: usize,
+        min_message: Option<impl Into<String> + Clone + 'static>,
+        max_message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         self.min_length(min, min_message).max_length(max, max_message)
     }
 
-    /// Validate email format
-    /// 
-    /// # Arguments
-    /// * `message` - Optional custom error message. If not provided, uses default message.
-    pub fn email(self, message: Option<impl Into<String>>) -> Self
-    where
-        T: AsRef<str>,
-    {
-        let msg = message.map(|m| m.into()).unwrap_or_else(|| "must be a valid email address".to_string());
-        self.rule(move |value| {
-            let email_regex = regex::Regex::new(
-                r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-            )
-            .unwrap();
-            if !email_regex.is_match(value.as_ref()) {
-                Some(msg.clone())
-            } else {
-                None
+    pub fn email(self, message: Option<impl Into<String>>) -> Self {
+        let msg = message
+            .map(|m| m.into())
+            .unwrap_or_else(|| "must be a valid email address".to_string());
+        self.rule(move |opt| {
+            let email_regex =
+                regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
+            match opt {
+                Some(v) if !email_regex.is_match(v.as_ref()) => Some(msg.clone()),
+                _ => None,
             }
         })
     }
+}
 
-    /// Validate that value is greater than a minimum
-    /// 
-    /// # Arguments
-    /// * `min` - Minimum value (exclusive)
-    /// * `message` - Optional custom error message. If not provided, uses default message with the min value.
-    pub fn greater_than(self, min: impl Into<f64> + Copy + 'static, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: Numeric,
-    {
+// ── Option-transparent numeric rules ─────────────────────────────────────────
+
+impl<T: 'static, V: Numeric + 'static> RuleBuilder<T, Option<V>> {
+    pub fn greater_than(
+        self,
+        min: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let min_val = min.into();
+        let msg = message.map(|m| m.into());
+        self.rule(move |opt| match opt {
+            Some(v) if v.to_f64() <= min_val => Some(
+                msg.clone()
+                    .unwrap_or_else(|| format!("must be greater than {}", min_val)),
+            ),
+            _ => None,
+        })
+    }
+
+    pub fn greater_than_or_equal(
+        self,
+        min: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let min_val = min.into();
+        let msg = message.map(|m| m.into());
+        self.rule(move |opt| match opt {
+            Some(v) if v.to_f64() < min_val => Some(msg.clone().unwrap_or_else(|| {
+                format!("must be greater than or equal to {}", min_val)
+            })),
+            _ => None,
+        })
+    }
+
+    pub fn less_than(
+        self,
+        max: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let max_val = max.into();
+        let msg = message.map(|m| m.into());
+        self.rule(move |opt| match opt {
+            Some(v) if v.to_f64() >= max_val => Some(
+                msg.clone()
+                    .unwrap_or_else(|| format!("must be less than {}", max_val)),
+            ),
+            _ => None,
+        })
+    }
+
+    pub fn less_than_or_equal(
+        self,
+        max: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let max_val = max.into();
+        let msg = message.map(|m| m.into());
+        self.rule(move |opt| match opt {
+            Some(v) if v.to_f64() > max_val => Some(msg.clone().unwrap_or_else(|| {
+                format!("must be less than or equal to {}", max_val)
+            })),
+            _ => None,
+        })
+    }
+
+    pub fn inclusive_between(
+        self,
+        min: impl Into<f64> + Copy + 'static,
+        max: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
+        let min_val = min.into();
+        let max_val = max.into();
+        let msg = message.map(|m| m.into());
+        self.rule(move |opt| match opt {
+            Some(v) => {
+                let val = v.to_f64();
+                if val < min_val || val > max_val {
+                    Some(
+                        msg.clone()
+                            .unwrap_or_else(|| format!("must be between {} and {}", min_val, max_val)),
+                    )
+                } else {
+                    None
+                }
+            }
+            None => None,
+        })
+    }
+}
+
+// ── Numeric rules ────────────────────────────────────────────────────────────
+
+impl<T: 'static, V: Numeric + NotOption + 'static> RuleBuilder<T, V> {
+    pub fn greater_than(
+        self,
+        min: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         let min_val = min.into();
         let msg = message.map(|m| m.into());
         self.rule(move |value| {
             if value.to_f64() <= min_val {
-                Some(msg.clone().unwrap_or_else(|| format!("must be greater than {}", min_val)))
+                Some(
+                    msg.clone()
+                        .unwrap_or_else(|| format!("must be greater than {}", min_val)),
+                )
             } else {
                 None
             }
         })
     }
 
-    /// Validate that value is greater than or equal to a minimum
-    /// 
-    /// # Arguments
-    /// * `min` - Minimum value (inclusive)
-    /// * `message` - Optional custom error message. If not provided, uses default message with the min value.
-    pub fn greater_than_or_equal(self, min: impl Into<f64> + Copy + 'static, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: Numeric,
-    {
+    pub fn greater_than_or_equal(
+        self,
+        min: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         let min_val = min.into();
         let msg = message.map(|m| m.into());
         self.rule(move |value| {
             if value.to_f64() < min_val {
-                Some(msg.clone().unwrap_or_else(|| format!("must be greater than or equal to {}", min_val)))
+                Some(msg.clone().unwrap_or_else(|| {
+                    format!("must be greater than or equal to {}", min_val)
+                }))
             } else {
                 None
             }
         })
     }
 
-    /// Validate that value is less than a maximum
-    /// 
-    /// # Arguments
-    /// * `max` - Maximum value (exclusive)
-    /// * `message` - Optional custom error message. If not provided, uses default message with the max value.
-    pub fn less_than(self, max: impl Into<f64> + Copy + 'static, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: Numeric,
-    {
+    pub fn less_than(
+        self,
+        max: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         let max_val = max.into();
         let msg = message.map(|m| m.into());
         self.rule(move |value| {
             if value.to_f64() >= max_val {
-                Some(msg.clone().unwrap_or_else(|| format!("must be less than {}", max_val)))
+                Some(
+                    msg.clone()
+                        .unwrap_or_else(|| format!("must be less than {}", max_val)),
+                )
             } else {
                 None
             }
         })
     }
 
-    /// Validate that value is less than or equal to a maximum
-    /// 
-    /// # Arguments
-    /// * `max` - Maximum value (inclusive)
-    /// * `message` - Optional custom error message. If not provided, uses default message with the max value.
-    pub fn less_than_or_equal(self, max: impl Into<f64> + Copy + 'static, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: Numeric,
-    {
+    pub fn less_than_or_equal(
+        self,
+        max: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         let max_val = max.into();
         let msg = message.map(|m| m.into());
         self.rule(move |value| {
             if value.to_f64() > max_val {
-                Some(msg.clone().unwrap_or_else(|| format!("must be less than or equal to {}", max_val)))
+                Some(msg.clone().unwrap_or_else(|| {
+                    format!("must be less than or equal to {}", max_val)
+                }))
             } else {
                 None
             }
         })
     }
 
-    /// Validate that value is within a range (inclusive)
-    /// 
-    /// # Arguments
-    /// * `min` - Minimum value (inclusive)
-    /// * `max` - Maximum value (inclusive)
-    /// * `message` - Optional custom error message. If not provided, uses default message with the min and max values.
-    pub fn inclusive_between(self, min: impl Into<f64> + Copy + 'static, max: impl Into<f64> + Copy + 'static, message: Option<impl Into<String> + Clone + 'static>) -> Self
-    where
-        T: Numeric,
-    {
+    pub fn inclusive_between(
+        self,
+        min: impl Into<f64> + Copy + 'static,
+        max: impl Into<f64> + Copy + 'static,
+        message: Option<impl Into<String> + Clone + 'static>,
+    ) -> Self {
         let min_val = min.into();
         let max_val = max.into();
         let msg = message.map(|m| m.into());
         self.rule(move |value| {
             let val = value.to_f64();
             if val < min_val || val > max_val {
-                Some(msg.clone().unwrap_or_else(|| format!("must be between {} and {}", min_val, max_val)))
+                Some(
+                    msg.clone()
+                        .unwrap_or_else(|| format!("must be between {} and {}", min_val, max_val)),
+                )
             } else {
                 None
             }
         })
-    }
-
-    /// Validate with a custom predicate
-    pub fn must(self, predicate: impl Fn(&T) -> bool + 'static, message: impl Into<String> + Clone + 'static) -> Self {
-        let msg = message.into();
-        self.rule(move |value| {
-            if !predicate(value) {
-                Some(msg.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Build the rule and return a function that can be used in a validator
-    pub fn build(self) -> impl Fn(&T) -> Vec<ValidationError> {
-        let property_name = self.property_name.clone();
-        let rules = self.rules;
-        move |value: &T| {
-            let mut errors = Vec::new();
-            for rule in &rules {
-                if let Some(message) = rule(value) {
-                    errors.push(ValidationError::new(property_name.clone(), message));
-                }
-            }
-            errors
-        }
     }
 }
-

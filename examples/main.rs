@@ -9,34 +9,34 @@ struct CreateCustomerRequest {
     age: i32,
 }
 
-fn customer_validator() -> impl Validator<CreateCustomerRequest> {
+fn customer_validator() -> FluentValidator<CreateCustomerRequest> {
     let v = FluentValidator::<CreateCustomerRequest>::new();
 
-    rule_for!(v, c.name)
+    rule_for!(v, |c| &c.name)
         .not_empty(None::<String>)
         .min_length(2, None::<String>)
         .max_length(50, None::<String>);
 
-    rule_for!(v, c.email)
+    rule_for!(v, |c| &c.email)
         .not_empty(None::<String>)
         .email(None::<String>);
 
-    rule_for!(v, c.age)
+    rule_for!(v, |c| &c.age)
         .greater_than_or_equal(18, Some("must be at least 18 years old"))
         .less_than_or_equal(120, None::<String>);
 
-    rule_for!(v, c.phone)
+    rule_for!(v, |c| &c.phone)
         .not_empty(None::<String>);
 
     // Cross-property rule: alt_phone must differ from phone
-    rule_for!(v, c.alt_phone)
+    rule_for!(v, |c| &c.alt_phone)
         .not_empty(None::<String>)
         .must(
             |req, val| val != &req.phone,
             "alternative phone cannot be the same as primary phone",
         );
 
-    v.build()
+    v
 }
 
 fn main() {
@@ -51,7 +51,7 @@ fn main() {
         age: 15,                    // too young
     };
 
-    let result = validate(&invalid, &validator);
+    let result = validator.validate(&invalid);
     if !result.is_valid() {
         for error in result.errors() {
             println!("  {}: {}", error.property, error.message);
@@ -67,7 +67,7 @@ fn main() {
         age: 30,
     };
 
-    let result = validate(&valid, &validator);
+    let result = validator.validate(&valid);
     if result.is_valid() {
         println!("  Validation passed.");
     }

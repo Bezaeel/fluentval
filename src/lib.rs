@@ -1,61 +1,67 @@
-//! FluentVal - A fluent validation library for Rust
+//! FluentVal — a fluent validation library for Rust.
 //!
-//! This library provides two APIs:
+//! The API centers on two types:
 //!
-//! **v0.x API** (`ValidatorBuilder` + `RuleBuilder`) — still supported.
+//! - [`RuleBuilder<T, V>`] — builds a validation rule chain for a field of type `V` on a
+//!   struct of type `T`. Use standalone when you want a callable `Fn(&T) -> Vec<ValidationError>`.
+//! - [`FluentValidator<T>`] — collects rules across many fields and exposes
+//!   [`Validator::validate`].
 //!
-//! **v1.0 API** (`FluentValidator` + `rule_for!` macro) — simplified, eliminates property
-//! name duplication and merges cross-property validation onto the property chain.
+//! Each call to [`FluentValidator::rule_for`] (or the [`rule_for!`] macro) returns a
+//! `RuleBuilder` that auto-registers into the validator when dropped — no build step.
 //!
-//! # v1.0 Example
+//! # Example
 //! ```rust,ignore
-//! use fluentval::{FluentValidator, rule_for, Validator, validate};
+//! use fluentval::{FluentValidator, rule_for, Validator};
 //!
 //! struct User { name: String, email: String, age: i32 }
 //!
 //! let v = FluentValidator::<User>::new();
-//! rule_for!(v, u.name).not_empty(None::<String>).min_length(2, None::<String>);
-//! rule_for!(v, u.email).not_empty(None::<String>).email(None::<String>);
-//! rule_for!(v, u.age).greater_than_or_equal(18, Some("Must be 18 or older"));
-//! let validator = v.build();
+//! rule_for!(v, |u| &u.name).not_empty(None::<String>).min_length(2, None::<String>);
+//! rule_for!(v, |u| &u.email).not_empty(None::<String>).email(None::<String>);
+//! rule_for!(v, |u| &u.age).greater_than_or_equal(18, Some("Must be 18 or older"));
 //!
 //! let user = User { name: "".into(), email: "invalid".into(), age: 15 };
-//! let result = validator.validate(&user);
+//! let result = v.validate(&user);
 //! for error in result.errors() {
 //!     println!("{}: {}", error.property, error.message);
 //! }
 //! ```
+//!
+//! Or, without the macro:
+//! ```rust,ignore
+//! v.rule_for("name", |u| &u.name).not_empty(None::<String>);
+//! ```
 
-mod builder;
 mod error;
 mod fluent_validator;
 mod rule;
 mod traits;
 
-// v0.x API
-pub use builder::{validate, ValidatorBuilder};
 pub use error::{ValidationError, ValidationResult};
-pub use rule::{Rule, RuleBuilder};
-pub use traits::{Numeric, OptionLike, Validator};
+pub use fluent_validator::FluentValidator;
+pub use rule::RuleBuilder;
+pub use traits::{NotOption, Numeric, OptionLike, Validator};
 
-// v1.0 API
-pub use fluent_validator::{FluentValidator, PropertyRuleBuilder};
-
-/// Create a [`PropertyRuleBuilder`] for a field on a [`FluentValidator`].
+/// Create a [`RuleBuilder`] for a field on a [`FluentValidator`].
 ///
-/// `rule_for!(v, c.field)` expands to `v.rule_for("field", |c| &c.field)`.
-/// `rule_for!(v, c.field.subfield)` expands to `v.rule_for("field.subfield", |c| &c.field.subfield)`.
+/// Takes a closure literal `|binding| &binding.field`:
 ///
-/// The identifier before the `.` (`c` in the examples) is used as the closure parameter name.
+/// - `rule_for!(v, |c| &c.field)` expands to `v.rule_for("field", |c| &c.field)`.
+/// - `rule_for!(v, |c| &c.field.subfield)` expands to
+///   `v.rule_for("field.subfield", |c| &c.field.subfield)`.
+///
+/// The identifier(s) after the last `.` become the property name (via `stringify!`); the
+/// binding on the left of `|...|` is whatever you choose.
 #[macro_export]
 macro_rules! rule_for {
-    ($v:expr, $c:ident . $field:ident) => {
-        $v.rule_for(stringify!($field), |$c| &$c.$field)
+    ($v:expr, | $c:ident | & $base:ident . $field:ident) => {
+        $v.rule_for(stringify!($field), |$c: &_| &$base.$field)
     };
-    ($v:expr, $c:ident . $field:ident . $subfield:ident) => {
+    ($v:expr, | $c:ident | & $base:ident . $field:ident . $subfield:ident) => {
         $v.rule_for(
             concat!(stringify!($field), ".", stringify!($subfield)),
-            |$c| &$c.$field.$subfield,
+            |$c: &_| &$base.$field.$subfield,
         )
     };
 }
