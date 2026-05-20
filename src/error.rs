@@ -61,7 +61,7 @@ impl ValidationResult {
         for error in &self.errors {
             grouped
                 .entry(error.property.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(error.message.clone());
         }
         grouped
