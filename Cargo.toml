@@ -1,7 +1,8 @@
 [package]
 name = "fluentval"
-version = "1.0.1"
+version = "2.0.0"
 edition = "2021"
+rust-version = "1.80"
 authors = ["https://github.com/bezaeel"]
 description = "A fluent validation library for Rust with a builder pattern API"
 license = "MIT OR Apache-2.0"

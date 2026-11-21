@@ -1,10 +1,26 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, LazyLock, PoisonError, RwLock};
+
+use regex::Regex;
 
 use crate::error::ValidationError;
 use crate::traits::{NotOption, Numeric, OptionLike};
 
-pub(crate) type ParentRules<T> = Rc<RefCell<Vec<Box<dyn Fn(&T) -> Vec<ValidationError>>>>>;
+/// A compiled, thread-safe rule: takes the object under validation and returns its errors.
+pub(crate) type BoxedRule<T> = Box<dyn Fn(&T) -> Vec<ValidationError> + Send + Sync>;
+
+/// Shared rule list owned by a `FluentValidator` and appended to by its `RuleBuilder`s.
+pub(crate) type ParentRules<T> = Arc<RwLock<Vec<BoxedRule<T>>>>;
+
+type Accessor<T, V> = Box<dyn Fn(&T) -> &V + Send + Sync>;
+type ValueRule<V> = Box<dyn Fn(&V) -> Option<String> + Send + Sync>;
+type CrossRule<T, V> = Box<dyn Fn(&T, &V) -> Option<String> + Send + Sync>;
+type Condition<T> = Box<dyn Fn(&T) -> bool + Send + Sync>;
+
+/// Email pattern, compiled once on first use and shared across all rules and threads.
+static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+        .expect("email regex is valid")
+});
 
 /// Builder for validation rules.
 ///
@@ -38,10 +54,10 @@ pub(crate) type ParentRules<T> = Rc<RefCell<Vec<Box<dyn Fn(&T) -> Vec<Validation
 /// ending the statement) — no `.build()` call required.
 pub struct RuleBuilder<T: 'static, V: 'static> {
     property_name: String,
-    accessor: Option<Box<dyn Fn(&T) -> &V + 'static>>,
-    value_rules: Vec<Box<dyn Fn(&V) -> Option<String>>>,
-    cross_rules: Vec<Box<dyn Fn(&T, &V) -> Option<String>>>,
-    condition: Option<Box<dyn Fn(&T) -> bool + 'static>>,
+    accessor: Option<Accessor<T, V>>,
+    value_rules: Vec<ValueRule<V>>,
+    cross_rules: Vec<CrossRule<T, V>>,
+    condition: Option<Condition<T>>,
     parent_rules: Option<ParentRules<T>>,
 }
 
@@ -52,7 +68,7 @@ impl<T: 'static, V: 'static> RuleBuilder<T, V> {
     /// access via [`must`](Self::must).
     pub fn for_property<F>(property_name: impl Into<String>, accessor: F) -> Self
     where
-        F: Fn(&T) -> &V + 'static,
+        F: Fn(&T) -> &V + Send + Sync + 'static,
     {
         Self {
             property_name: property_name.into(),
@@ -70,7 +86,7 @@ impl<T: 'static, V: 'static> RuleBuilder<T, V> {
     }
 
     /// Add a custom value-level rule.
-    pub fn rule(mut self, rule: impl Fn(&V) -> Option<String> + 'static) -> Self {
+    pub fn rule(mut self, rule: impl Fn(&V) -> Option<String> + Send + Sync + 'static) -> Self {
         self.value_rules.push(Box::new(rule));
         self
     }
@@ -83,8 +99,8 @@ impl<T: 'static, V: 'static> RuleBuilder<T, V> {
     ///
     /// Calling `.when(...)` multiple times ANDs the predicates together; order in the chain
     /// does not matter — the condition gates every rule registered on this builder.
-    pub fn when(mut self, predicate: impl Fn(&T) -> bool + 'static) -> Self {
-        let predicate: Box<dyn Fn(&T) -> bool + 'static> = Box::new(predicate);
+    pub fn when(mut self, predicate: impl Fn(&T) -> bool + Send + Sync + 'static) -> Self {
+        let predicate: Condition<T> = Box::new(predicate);
         self.condition = Some(match self.condition.take() {
             Some(existing) => Box::new(move |t| existing(t) && predicate(t)),
             None => predicate,
@@ -95,7 +111,7 @@ impl<T: 'static, V: 'static> RuleBuilder<T, V> {
     /// Add a cross-property rule. The predicate receives the full object and the field value.
     pub fn must(
         mut self,
-        predicate: impl Fn(&T, &V) -> bool + 'static,
+        predicate: impl Fn(&T, &V) -> bool + Send + Sync + 'static,
         message: impl Into<String>,
     ) -> Self {
         let msg = message.into();
@@ -113,7 +129,7 @@ impl<T: 'static, V: 'static> RuleBuilder<T, V> {
     ///
     /// Consumes the builder; suppresses the auto-registration that would otherwise occur
     /// when a builder bound to a [`FluentValidator`](crate::FluentValidator) is dropped.
-    pub fn build(mut self) -> impl Fn(&T) -> Vec<ValidationError> {
+    pub fn build(mut self) -> impl Fn(&T) -> Vec<ValidationError> + Send + Sync {
         self.parent_rules = None;
         let property_name = std::mem::take(&mut self.property_name);
         let accessor = self.accessor.take().expect("RuleBuilder accessor missing");
@@ -177,7 +193,12 @@ impl<T: 'static, V: 'static> Drop for RuleBuilder<T, V> {
             }
             errors
         };
-        parent.borrow_mut().push(Box::new(rule_fn));
+        // A poisoned lock only means another thread panicked mid-push; the Vec is still
+        // structurally valid, so recover it rather than propagating the panic.
+        parent
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Box::new(rule_fn));
     }
 }
 
@@ -248,9 +269,7 @@ impl<T: 'static, V: AsRef<str> + NotOption + 'static> RuleBuilder<T, V> {
             .map(|m| m.into())
             .unwrap_or_else(|| "must be a valid email address".to_string());
         self.rule(move |value| {
-            let email_regex =
-                regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
-            if !email_regex.is_match(value.as_ref()) {
+            if !EMAIL_REGEX.is_match(value.as_ref()) {
                 Some(msg.clone())
             } else {
                 None
@@ -336,13 +355,9 @@ impl<T: 'static, V: AsRef<str> + 'static> RuleBuilder<T, Option<V>> {
         let msg = message
             .map(|m| m.into())
             .unwrap_or_else(|| "must be a valid email address".to_string());
-        self.rule(move |opt| {
-            let email_regex =
-                regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
-            match opt {
-                Some(v) if !email_regex.is_match(v.as_ref()) => Some(msg.clone()),
-                _ => None,
-            }
+        self.rule(move |opt| match opt {
+            Some(v) if !EMAIL_REGEX.is_match(v.as_ref()) => Some(msg.clone()),
+            _ => None,
         })
     }
 }

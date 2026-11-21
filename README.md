@@ -10,12 +10,13 @@ A fluent validation library for Rust. FluentVal provides a chainable, type-safe 
 - Custom rules via `.rule(...)` and cross-property `.must(...)`
 - Rich error reporting with per-property grouping
 - Two equivalent usage styles: explicit (no macro) or `rule_for!` macro sugar
+- Thread-safe — `FluentValidator<T>` is `Send + Sync`, so build it once and share it (e.g. `Arc` app state or a `static`)
 
 ## Installation
 
 ```toml
 [dependencies]
-fluentval = "1.0.0"
+fluentval = "2.0.0"
 ```
 
 ## Quick Start
@@ -282,6 +283,24 @@ if let Some(msg) = result.first_error_for("email") {
     println!("Email error: {}", msg);
 }
 ```
+
+## Breaking Changes in v2.0
+
+`FluentValidator<T>` and rules produced by `RuleBuilder::build()` are now `Send + Sync`. To make that possible, every closure you pass in — the accessor, `.rule(...)`, `.when(...)`, and `.must(...)` — must also be `Send + Sync`.
+
+Most code is unaffected. You only need to change rules whose closures capture non-thread-safe values such as `Rc`, `Cell`, or `RefCell`; swap those for `Arc`, atomics, `Mutex`, or `RwLock`.
+
+```rust
+// v1.x — compiled, but the validator could not be shared across threads
+let banned = Rc::new(vec!["admin".to_string()]);
+v.rule_for("name", |u: &User| &u.name).must(move |_, n| !banned.contains(n), "reserved");
+
+// v2.0 — use Arc instead of Rc
+let banned = Arc::new(vec!["admin".to_string()]);
+v.rule_for("name", |u: &User| &u.name).must(move |_, n| !banned.contains(n), "reserved");
+```
+
+Minimum supported Rust version is now **1.80**.
 
 ## Breaking Changes from v0.x
 

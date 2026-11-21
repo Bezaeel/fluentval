@@ -562,7 +562,7 @@ fn test_numeric_trait_implementations() {
     assert_eq!(5i8.to_f64(), 5.0);
     assert_eq!(10i32.to_f64(), 10.0);
     assert_eq!(20u32.to_f64(), 20.0);
-    assert!((3.14f32.to_f64() - 3.14).abs() < 0.0001);
+    assert_eq!(1.5f32.to_f64(), 1.5);
     assert_eq!(2.71f64.to_f64(), 2.71);
 }
 
@@ -832,4 +832,62 @@ fn test_fluent_validator_custom_messages() {
     });
     assert_eq!(result.first_error_for("name"), Some("name is required"));
     assert_eq!(result.first_error_for("age"), Some("must be an adult"));
+}
+
+// ── Thread safety ────────────────────────────────────────────────────────────
+
+fn assert_send_sync<X: Send + Sync>(_: &X) {}
+
+#[derive(Clone)]
+struct ThreadedUser {
+    name: String,
+    email: String,
+    age: i32,
+}
+
+fn threaded_validator() -> FluentValidator<ThreadedUser> {
+    let v = FluentValidator::<ThreadedUser>::new();
+    rule_for!(v, |u| &u.name).not_empty(None::<String>);
+    rule_for!(v, |u| &u.email).email(None::<String>);
+    rule_for!(v, |u| &u.age).greater_than_or_equal(18, None::<String>);
+    v
+}
+
+#[test]
+fn test_fluent_validator_is_send_sync() {
+    let v = threaded_validator();
+    assert_send_sync(&v);
+
+    let rule = RuleBuilder::for_property("name", |s: &String| s)
+        .not_empty(None::<String>)
+        .build();
+    assert_send_sync(&rule);
+}
+
+#[test]
+fn test_fluent_validator_shared_across_threads() {
+    let v = std::sync::Arc::new(threaded_validator());
+    let valid = ThreadedUser { name: "Ada".into(), email: "ada@example.com".into(), age: 36 };
+    let invalid = ThreadedUser { name: "".into(), email: "nope".into(), age: 10 };
+
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let v = std::sync::Arc::clone(&v);
+            let user = if i % 2 == 0 { valid.clone() } else { invalid.clone() };
+            std::thread::spawn(move || (i, v.validate(&user).errors().len()))
+        })
+        .collect();
+
+    for h in handles {
+        let (i, n) = h.join().unwrap();
+        assert_eq!(n, if i % 2 == 0 { 0 } else { 3 });
+    }
+}
+
+#[test]
+fn test_fluent_validator_in_static() {
+    static V: std::sync::OnceLock<FluentValidator<ThreadedUser>> = std::sync::OnceLock::new();
+    let v = V.get_or_init(threaded_validator);
+    let user = ThreadedUser { name: "Ada".into(), email: "ada@example.com".into(), age: 36 };
+    assert!(v.validate(&user).is_valid());
 }
