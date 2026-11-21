@@ -131,6 +131,14 @@ impl<T: 'static, V: 'static> RuleBuilder<T, V> {
     /// when a builder bound to a [`FluentValidator`](crate::FluentValidator) is dropped.
     pub fn build(mut self) -> impl Fn(&T) -> Vec<ValidationError> + Send + Sync {
         self.parent_rules = None;
+        self.take_rule_fn()
+    }
+
+    /// Move the accumulated rules out of the builder and compile them into a single closure.
+    ///
+    /// Called exactly once per builder — from either [`build`](Self::build) or `Drop` — so the
+    /// accessor is always present.
+    fn take_rule_fn(&mut self) -> impl Fn(&T) -> Vec<ValidationError> + Send + Sync + 'static {
         let property_name = std::mem::take(&mut self.property_name);
         let accessor = self.accessor.take().expect("RuleBuilder accessor missing");
         let value_rules = std::mem::take(&mut self.value_rules);
@@ -165,34 +173,7 @@ impl<T: 'static, V: 'static> Drop for RuleBuilder<T, V> {
         let Some(parent) = self.parent_rules.take() else {
             return;
         };
-        let Some(accessor) = self.accessor.take() else {
-            return;
-        };
-        let property_name = std::mem::take(&mut self.property_name);
-        let value_rules = std::mem::take(&mut self.value_rules);
-        let cross_rules = std::mem::take(&mut self.cross_rules);
-        let condition = self.condition.take();
-
-        let rule_fn = move |instance: &T| {
-            if let Some(cond) = &condition {
-                if !cond(instance) {
-                    return Vec::new();
-                }
-            }
-            let value = accessor(instance);
-            let mut errors = Vec::new();
-            for r in &value_rules {
-                if let Some(message) = r(value) {
-                    errors.push(ValidationError::new(property_name.clone(), message));
-                }
-            }
-            for r in &cross_rules {
-                if let Some(message) = r(instance, value) {
-                    errors.push(ValidationError::new(property_name.clone(), message));
-                }
-            }
-            errors
-        };
+        let rule_fn = self.take_rule_fn();
         // A poisoned lock only means another thread panicked mid-push; the Vec is still
         // structurally valid, so recover it rather than propagating the panic.
         parent

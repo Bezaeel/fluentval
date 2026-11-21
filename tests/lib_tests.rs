@@ -383,6 +383,108 @@ fn test_option_numeric_full_range() {
 }
 
 #[test]
+fn test_option_string_length_and_max_length_failure() {
+    let rule_fn = RuleBuilder::for_property("code", |s: &Option<String>| s)
+        .length(2, 4, None::<String>, None::<String>)
+        .build();
+
+    assert!(rule_fn(&None::<String>).is_empty());
+    assert_eq!(
+        rule_fn(&Some("a".into()))[0].message,
+        "must be at least 2 characters long"
+    );
+    assert!(rule_fn(&Some("abc".into())).is_empty());
+    assert_eq!(
+        rule_fn(&Some("abcde".into()))[0].message,
+        "must be at most 4 characters long"
+    );
+}
+
+#[test]
+fn test_option_string_custom_messages() {
+    let rule_fn = RuleBuilder::for_property("email", |s: &Option<String>| s)
+        .not_empty(Some("email required"))
+        .min_length(5, Some("email too short"))
+        .max_length(6, Some("email too long"))
+        .email(Some("email invalid"))
+        .build();
+
+    let messages = |v: &str| -> Vec<String> {
+        rule_fn(&Some(v.to_string())).into_iter().map(|e| e.message).collect()
+    };
+    assert_eq!(messages(""), ["email required", "email too short", "email invalid"]);
+    assert_eq!(messages("a@b.example"), ["email too long"]);
+}
+
+#[test]
+fn test_option_numeric_less_than() {
+    let rule_fn = RuleBuilder::for_property("count", |c: &Option<u32>| c)
+        .less_than(10, None::<String>)
+        .build();
+
+    assert!(rule_fn(&None::<u32>).is_empty());
+    assert!(rule_fn(&Some(9)).is_empty());
+    assert_eq!(rule_fn(&Some(10))[0].message, "must be less than 10");
+}
+
+#[test]
+fn test_option_numeric_custom_messages() {
+    let rule_fn = RuleBuilder::for_property("score", |s: &Option<i32>| s)
+        .greater_than(0, Some("gt"))
+        .greater_than_or_equal(1, Some("gte"))
+        .less_than(10, Some("lt"))
+        .less_than_or_equal(9, Some("lte"))
+        .inclusive_between(1, 9, Some("between"))
+        .build();
+
+    let messages = |v: i32| -> Vec<String> {
+        rule_fn(&Some(v)).into_iter().map(|e| e.message).collect()
+    };
+    assert_eq!(messages(0), ["gt", "gte", "between"]);
+    assert_eq!(messages(10), ["lt", "lte", "between"]);
+    assert!(messages(5).is_empty());
+}
+
+// Exercises every path of the shared rule closure and `Drop` with a single `(T, V)` pair:
+// generic code only counts as covered when one monomorphization hits all branches.
+struct Gate {
+    enabled: bool,
+    name: String,
+    reserved: String,
+}
+
+#[test]
+fn test_rule_paths_single_instantiation() {
+    // Registered via FluentValidator (Drop with a parent), with chained `.when()` calls
+    // from the same call site so both arms of the AND-combination run.
+    let v = FluentValidator::<Gate>::new();
+    let mut b = v.rule_for("name", |g: &Gate| &g.name);
+    for _ in 0..2 {
+        b = b.when(|g| g.enabled);
+    }
+    b.not_empty(None::<String>)
+        .must(|g, n| n != &g.reserved, "name is reserved");
+
+    let gate = |enabled, name: &str| Gate {
+        enabled,
+        name: name.into(),
+        reserved: "root".into(),
+    };
+    assert!(v.validate(&gate(false, "")).is_valid()); // condition false → skipped
+    assert!(v.validate(&gate(true, "ada")).is_valid()); // condition true, all pass
+    let r = v.validate(&gate(true, "root")); // cross rule fails
+    assert_eq!(r.first_error_for("name"), Some("name is reserved"));
+    assert_eq!(v.validate(&gate(true, "")).errors().len(), 1); // value rule fails
+
+    // Standalone via build() (Drop without a parent), no condition.
+    let rule = RuleBuilder::for_property("name", |g: &Gate| &g.name)
+        .not_empty(None::<String>)
+        .build();
+    assert!(rule(&gate(false, "x")).is_empty());
+    assert_eq!(rule(&gate(false, "")).len(), 1);
+}
+
+#[test]
 fn test_option_compose_not_null_and_value_rules() {
     // Mirrors the canonical "if Married, age must be present AND >= 18" use case.
     #[derive(Debug)]
@@ -573,6 +675,7 @@ fn test_numeric_trait_remaining_implementations() {
     assert_eq!(200u8.to_f64(), 200.0);
     assert_eq!(1000u16.to_f64(), 1000.0);
     assert_eq!(50000u64.to_f64(), 50000.0);
+    assert_eq!((-7isize).to_f64(), -7.0);
 }
 
 #[test]
