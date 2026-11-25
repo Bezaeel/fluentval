@@ -1,8 +1,7 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, PoisonError, RwLock};
 
-use crate::error::{ValidationError, ValidationResult};
-use crate::rule::RuleBuilder;
+use crate::error::ValidationResult;
+use crate::rule::{ParentRules, RuleBuilder};
 use crate::traits::Validator;
 
 /// Entry point for the fluent validation API.
@@ -10,6 +9,10 @@ use crate::traits::Validator;
 /// Construct a validator, register property rules via [`rule_for`](Self::rule_for) (or the
 /// [`rule_for!`](crate::rule_for) macro), then call [`validate`](Validator::validate) on the
 /// validator itself — there is no separate build step.
+///
+/// `FluentValidator<T>` is `Send + Sync`, so a configured validator can be shared across
+/// threads (e.g. wrapped in an `Arc` as web-framework state, or stored in a `static`).
+/// All rule closures must therefore be `Send + Sync` as well.
 ///
 /// Each `rule_for(...)` call returns a [`RuleBuilder<T, V>`] that auto-registers into the
 /// validator when it is dropped (at the `;` ending the statement).
@@ -30,14 +33,14 @@ use crate::traits::Validator;
 /// let result = v.validate(&user);
 /// ```
 pub struct FluentValidator<T: 'static> {
-    rules: Rc<RefCell<Vec<Box<dyn Fn(&T) -> Vec<ValidationError>>>>>,
+    rules: ParentRules<T>,
 }
 
 impl<T: 'static> FluentValidator<T> {
     /// Create a new, empty `FluentValidator`.
     pub fn new() -> Self {
         Self {
-            rules: Rc::new(RefCell::new(Vec::new())),
+            rules: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -51,9 +54,9 @@ impl<T: 'static> FluentValidator<T> {
         accessor: F,
     ) -> RuleBuilder<T, V>
     where
-        F: Fn(&T) -> &V + 'static,
+        F: Fn(&T) -> &V + Send + Sync + 'static,
     {
-        RuleBuilder::for_property(property_name, accessor).with_parent(Rc::clone(&self.rules))
+        RuleBuilder::for_property(property_name, accessor).with_parent(Arc::clone(&self.rules))
     }
 }
 
@@ -66,7 +69,8 @@ impl<T: 'static> Default for FluentValidator<T> {
 impl<T: 'static> Validator<T> for FluentValidator<T> {
     fn validate(&self, instance: &T) -> ValidationResult {
         let mut result = ValidationResult::new();
-        for rule in self.rules.borrow().iter() {
+        let rules = self.rules.read().unwrap_or_else(PoisonError::into_inner);
+        for rule in rules.iter() {
             result.add_errors(rule(instance));
         }
         result
